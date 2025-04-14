@@ -24,8 +24,8 @@ cd trump-notifier
 
 ### 2. 建立虛擬環境並安裝依賴
 ```bash
-python -m venv my-env
-source venv/bin/activate
+python -m venv truthbrush-env
+source truthbrush-env/bin/activate
 pip install -r requirements.txt
 ```
 
