@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+
+# 虛擬環境
+venv/
+.env
+.env.*
+
+# 依賴清單暫存
+*.egg-info/
+pip-log.txt
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+
+# 已推播紀錄檔案
+seen_post_ids.txt
