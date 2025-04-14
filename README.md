@@ -33,13 +33,16 @@ pip install -r requirements.txt
 ```bash
 pip install git+https://github.com/stanfordio/truthbrush.git
 ``` 
-若在 Linux 環境出現 externally-managed-environment 錯誤，請務必使用虛擬環境執行安裝。
+> 若在 Linux 環境出現 externally-managed-environment 錯誤，請務必使用虛擬環境執行安裝。
+
 
 ---
 
 ## 🔐 建立環境變數 .env
 請參考 .env.template 檔案建立 .env：
 ```bash
+TRUTHSOCIAL_USERNAME=foo                            # 您的 Truth Social 使用者名稱
+TRUTHSOCIAL_PASSWORD=bar                            # 您的 Truth Social 密碼               
 TRUTHSOCIAL_SEARCH_USERNAME=realDonaldTrump         # 要追蹤的使用者
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here     # Telegram Bot Token
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx                     # 頻道/群組 ID（注意：頻道需設為公開）
