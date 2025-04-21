@@ -51,7 +51,7 @@ def save_seen_ids(seen_ids):
 # --- 4. 使用 truthbrush 抓取川普貼文
 def fetch_trump_posts():
     # 取得當下 UTC 時間往前 15 分鐘作為篩選時間
-    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(hours=15)
+    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
     since = ten_minutes_ago.isoformat()
 
     print(f"🔍 抓取從 {since} 之後的貼文...")
