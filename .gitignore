@@ -10,6 +10,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.template
 
 # 依賴清單暫存
 *.egg-info/
