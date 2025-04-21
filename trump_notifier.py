@@ -10,7 +10,7 @@ import os
 from googletrans import Translator
 from libretranslatepy import LibreTranslateAPI
 google_translator = Translator(service_urls=['translate.google.com'])
-libre_translator = LibreTranslateAPI("https://translate.flossboxin.org.in/")
+libre_translator = LibreTranslateAPI("https://lt.blitzw.in/")
 
 # 載入環境變數
 from dotenv import load_dotenv
@@ -22,6 +22,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = 600  # 每 600 秒（10 分鐘）檢查一次
 SEEN_IDS_FILE = Path('seen_post_ids.txt')
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 # --- 1. 傳送 Telegram 訊息函數 ---
 def send_telegram_message(text):
@@ -50,7 +51,7 @@ def save_seen_ids(seen_ids):
 # --- 4. 使用 truthbrush 抓取川普貼文
 def fetch_trump_posts():
     # 取得當下 UTC 時間往前 15 分鐘作為篩選時間
-    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(hours=15)
     since = ten_minutes_ago.isoformat()
 
     print(f"🔍 抓取從 {since} 之後的貼文...")
@@ -61,7 +62,27 @@ def fetch_trump_posts():
             capture_output=True,
             text=True
         )
-        return [json.loads(line) for line in result.stdout.strip().splitlines() if line.strip()]
+        posts = [json.loads(line) for line in result.stdout.strip().splitlines() if line.strip()]
+
+        # 過濾掉轉發的貼文
+        original_posts = []
+        for post in posts:
+            # 獲取貼文內容並清除 HTML 標籤
+            from html import unescape
+            import re
+            content_html = post.get("content", "")
+            content_text = re.sub(r"<[^>]*>", "", content_html).strip()
+            
+            # 檢查是否為轉發貼文且有文字內容
+            if (post.get("reblog") is None and 
+                not content_html.startswith("RT @") and 
+                content_text):  # 確保有文字內容
+                original_posts.append(post)
+            else:
+                reason = "轉發貼文" if post.get("reblog") is not None or content_html.startswith("RT @") else "無文字內容"
+                print(f"🔄 過濾掉一則貼文: ID {post.get('id')} (原因: {reason})")
+                
+        return original_posts
     except Exception as e:
         print("Error fetching posts:", e)
         return []
@@ -93,8 +114,21 @@ def translate_to_chinese(text, retries=2):
         return libre_translator.translate(text, source="en", target="zh")
     except Exception as e:
         print("❌ LibreTranslate 翻譯也失敗:", e)
-        return "[翻譯失敗]"
 
+    # 改用 Google Cloud Translation fallback
+    try:
+        print("🔁 使用 Google Cloud Translation fallback 翻譯中...")
+        url = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
+        payload = {
+            "q": text,
+            "target": "zh-TW"
+        }
+        res = requests.post(url, json=payload)
+        return res.json()["data"]["translations"][0]["translatedText"]
+    except Exception as e:
+        print("❌ Google Cloud Translation 翻譯也失敗:", e)
+        return "[翻譯失敗]"
+    
 # --- 7. 主程式邏輯 ---
 def main():
     print("🟢 Trump notifier started.")
