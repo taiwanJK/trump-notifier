@@ -14,7 +14,7 @@ libre_translator = LibreTranslateAPI("https://lt.blitzw.in/")
 
 # 載入環境變數
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 # 取得環境變數
 TRUTHSOCIAL_SEARCH_USERNAME = os.environ.get("TRUTHSOCIAL_SEARCH_USERNAME", "realDonaldTrump")
@@ -33,7 +33,12 @@ def send_telegram_message(text):
         "parse_mode": "HTML"
     }
     response = requests.post(url, json=payload)
-    return response.status_code == 200
+    success = response.status_code == 200
+    if success:
+        print("✅ Telegram 訊息發送成功！")
+    else:
+        print(f"❌ Telegram 訊息發送失敗，狀態碼：{response.status_code}")
+    return success
 
 # --- 2. 讀取已通知過的貼文 ID ---
 def load_seen_ids():
@@ -99,21 +104,21 @@ def extract_post_text(post):
 # --- 6. 使用 googletrans或libretranslatepy 翻譯英文為中文 ---
 def translate_to_chinese(text, retries=2):
     # 先試 googletrans
-    for attempt in range(retries):
-        try:
-            result = google_translator.translate(text, dest='zh-tw')
-            if result and result.text:
-                return result.text
-        except Exception as e:
-            print(f"⚠️ googletrans 第 {attempt + 1} 次翻譯失敗: {e}")
-            time.sleep(5)
+    # for attempt in range(retries):
+    #     try:
+    #         result = google_translator.translate(text, dest='zh-tw')
+    #         if result and result.text:
+    #             return result.text
+    #     except Exception as e:
+    #         print(f"⚠️ googletrans 第 {attempt + 1} 次翻譯失敗: {e}")
+    #         time.sleep(5)
 
     # 改用 LibreTranslate fallback
-    try:
-        print("🔁 使用 LibreTranslate fallback 翻譯中...")
-        return libre_translator.translate(text, source="en", target="zh")
-    except Exception as e:
-        print("❌ LibreTranslate 翻譯也失敗:", e)
+    # try:
+    #     print("🔁 使用 LibreTranslate fallback 翻譯中...")
+    #     return libre_translator.translate(text, source="en", target="zh")
+    # except Exception as e:
+    #     print("❌ LibreTranslate 翻譯也失敗:", e)
 
     # 改用 Google Cloud Translation fallback
     try:
