@@ -7,10 +7,6 @@ from pathlib import Path
 import os
 import base64
 
-# 引入 google translate api
-google_translator = Translator(service_urls=['translate.google.com'])
-libre_translator = LibreTranslateAPI("https://lt.blitzw.in/")
-
 # 載入環境變數
 from dotenv import load_dotenv
 load_dotenv(override=True)
