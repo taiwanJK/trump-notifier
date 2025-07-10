@@ -46,12 +46,26 @@ TRUTHSOCIAL_PASSWORD=bar                            # 您的 Truth Social 密碼
 TRUTHSOCIAL_SEARCH_USERNAME=realDonaldTrump         # 要追蹤的使用者
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here     # Telegram Bot Token
 TELEGRAM_CHAT_ID=-100xxxxxxxxxx                     # 頻道/群組 ID（注意：頻道需設為公開）
+HTTP_PROXY_ENABLED=false                            # 是否啟用代理 (true/false)
+HTTP_PROXY_HOST=your_proxy_host                     # 代理伺服器主機名稱或 IP
+HTTP_PROXY_PORT=your_proxy_port                     # 代理伺服器連接埠
+HTTP_PROXY_USERNAME=your_proxy_username             # 代理伺服器使用者名稱（如需驗證）
+HTTP_PROXY_PASSWORD=your_proxy_password             # 代理伺服器密碼（如需驗證）
 ```
 
 建立指令：
 ```bash
 cp .env.template .env
 ```
+
+### 代理設定說明
+
+若您在網路受限的環境中運行（例如某些國家/地區可能無法直接訪問 Truth Social），可以通過設定 HTTP 代理來解決：
+
+1. 將 HTTP_PROXY_ENABLED 設為 true
+2. 填入您的代理伺服器資訊（主機、連接埠）
+3. 如果代理需要驗證，請填入使用者名稱和密碼
+系統會自動將代理設定應用於所有網路請求，包括 truthbrush 工具和 Telegram API 呼叫。
 
 ---
 

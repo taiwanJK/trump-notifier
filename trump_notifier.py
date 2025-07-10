@@ -5,10 +5,9 @@ import requests
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
+import base64
 
-# 引入 googletrans 與 LibreTranslate
-from googletrans import Translator
-from libretranslatepy import LibreTranslateAPI
+# 引入 google translate api
 google_translator = Translator(service_urls=['translate.google.com'])
 libre_translator = LibreTranslateAPI("https://lt.blitzw.in/")
 
@@ -24,6 +23,33 @@ CHECK_INTERVAL = 600  # 每 600 秒（10 分鐘）檢查一次
 SEEN_IDS_FILE = Path('seen_post_ids.txt')
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
+# 代理設定
+HTTP_PROXY_ENABLED = os.environ.get("HTTP_PROXY_ENABLED", "false").lower() == "true"
+HTTP_PROXY_HOST = os.environ.get("HTTP_PROXY_HOST", "")
+HTTP_PROXY_PORT = os.environ.get("HTTP_PROXY_PORT", "")
+HTTP_PROXY_USERNAME = os.environ.get("HTTP_PROXY_USERNAME", "")
+HTTP_PROXY_PASSWORD = os.environ.get("HTTP_PROXY_PASSWORD", "")
+
+# 設定代理
+proxies = {}
+if HTTP_PROXY_ENABLED and HTTP_PROXY_HOST and HTTP_PROXY_PORT:
+    proxy_auth = ""
+    if HTTP_PROXY_USERNAME and HTTP_PROXY_PASSWORD:
+        proxy_auth = f"{HTTP_PROXY_USERNAME}:{HTTP_PROXY_PASSWORD}@"
+    
+    proxy_url = f"http://{proxy_auth}{HTTP_PROXY_HOST}:{HTTP_PROXY_PORT}"
+    proxies = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
+    print(f"🔒 已啟用HTTP代理: {HTTP_PROXY_HOST}:{HTTP_PROXY_PORT}")
+    
+    # 設定環境變數，讓子進程也能使用代理
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+else:
+    print("ℹ️ 未啟用HTTP代理")
+
 # --- 1. 傳送 Telegram 訊息函數 ---
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -32,7 +58,7 @@ def send_telegram_message(text):
         "text": text,
         "parse_mode": "HTML"
     }
-    response = requests.post(url, json=payload)
+    response = requests.post(url, json=payload, proxies=proxies)
     success = response.status_code == 200
     if success:
         print("✅ Telegram 訊息發送成功！")
@@ -56,18 +82,55 @@ def save_seen_ids(seen_ids):
 # --- 4. 使用 truthbrush 抓取川普貼文
 def fetch_trump_posts():
     # 取得當下 UTC 時間往前 15 分鐘作為篩選時間
-    ten_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
-    since = ten_minutes_ago.isoformat()
+    fifteen_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+    since = fifteen_minutes_ago.isoformat()
 
     print(f"🔍 抓取從 {since} 之後的貼文...")
 
     try:
+        cmd = ["truthbrush", "statuses", TRUTHSOCIAL_SEARCH_USERNAME, "--no-replies", "--created-after", since]
+        print("執行命令:", " ".join(cmd))
+        
+        # 設定環境變數，讓 truthbrush 使用代理
+        env = os.environ.copy()
+        
         result = subprocess.run(
-            ["truthbrush", "statuses", TRUTHSOCIAL_SEARCH_USERNAME, "--no-replies", "--created-after", since],
+            cmd,
             capture_output=True,
-            text=True
+            text=True,
+            env=env
         )
-        posts = [json.loads(line) for line in result.stdout.strip().splitlines() if line.strip()]
+        
+        # 檢查命令是否執行成功
+        if result.returncode != 0:
+            print(f"❌ truthbrush 命令執行失敗，錯誤碼: {result.returncode}")
+            print(f"錯誤輸出: {result.stderr}")
+            
+            # 檢查是否為認證錯誤
+            if "Failed login request" in result.stderr or "HTTP Error 403" in result.stderr:
+                print("⚠️ 認證錯誤: truthbrush 無法登入 Truth Social 平台")
+                print("請檢查以下可能的問題:")
+                print("1. truthbrush 的認證資訊是否正確")
+                print("2. 伺服器的 IP 是否被 Truth Social 封鎖")
+                print("3. Truth Social API 是否有變更或限制")
+                print("4. 代理設定是否正確")
+            
+            return []
+            
+        # 檢查輸出是否為空
+        if not result.stdout.strip():
+            print("⚠️ truthbrush 命令執行成功，但沒有返回任何資料")
+            return []
+            
+        print(f"✅ truthbrush 命令執行成功，開始解析資料...")
+        
+        try:
+            posts = [json.loads(line) for line in result.stdout.strip().splitlines() if line.strip()]
+            print(f"📊 解析到 {len(posts)} 則貼文")
+        except json.JSONDecodeError as je:
+            print(f"❌ JSON 解析錯誤: {je}")
+            print(f"原始輸出: {result.stdout[:200]}..." if len(result.stdout) > 200 else result.stdout)
+            return []
 
         # 過濾掉轉發的貼文
         original_posts = []
@@ -88,8 +151,14 @@ def fetch_trump_posts():
                 print(f"🔄 過濾掉一則貼文: ID {post.get('id')} (原因: {reason})")
                 
         return original_posts
+    except FileNotFoundError as fnf:
+        print(f"❌ 找不到 truthbrush 命令: {fnf}")
+        print("請確認 truthbrush 已正確安裝在伺服器上，並且在 PATH 環境變數中")
+        return []
     except Exception as e:
-        print("Error fetching posts:", e)
+        print(f"❌ 抓取貼文時發生錯誤: {type(e).__name__}: {e}")
+        import traceback
+        print(f"詳細錯誤訊息: {traceback.format_exc()}")
         return []
 
 # --- 5. 將 HTML 貼文轉成純文字 ---
@@ -101,26 +170,9 @@ def extract_post_text(post):
     content_text = re.sub(r"<[^>]*>", "", content_html)
     return unescape(content_text.strip())
 
-# --- 6. 使用 googletrans或libretranslatepy 翻譯英文為中文 ---
+# --- 6. 使用 Google Cloud Translation 翻譯英文為中文 ---
 def translate_to_chinese(text, retries=2):
-    # 先試 googletrans
-    # for attempt in range(retries):
-    #     try:
-    #         result = google_translator.translate(text, dest='zh-tw')
-    #         if result and result.text:
-    #             return result.text
-    #     except Exception as e:
-    #         print(f"⚠️ googletrans 第 {attempt + 1} 次翻譯失敗: {e}")
-    #         time.sleep(5)
-
-    # 改用 LibreTranslate fallback
-    # try:
-    #     print("🔁 使用 LibreTranslate fallback 翻譯中...")
-    #     return libre_translator.translate(text, source="en", target="zh")
-    # except Exception as e:
-    #     print("❌ LibreTranslate 翻譯也失敗:", e)
-
-    # 改用 Google Cloud Translation fallback
+    # Google Cloud Translation fallback
     try:
         print("🔁 使用 Google Cloud Translation fallback 翻譯中...")
         url = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
@@ -128,7 +180,7 @@ def translate_to_chinese(text, retries=2):
             "q": text,
             "target": "zh-TW"
         }
-        res = requests.post(url, json=payload)
+        res = requests.post(url, json=payload, proxies=proxies)
         return res.json()["data"]["translations"][0]["translatedText"]
     except Exception as e:
         print("❌ Google Cloud Translation 翻譯也失敗:", e)
