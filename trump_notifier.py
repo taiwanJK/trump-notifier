@@ -17,7 +17,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = 600  # 每 600 秒（10 分鐘）檢查一次
 SEEN_IDS_FILE = Path('seen_post_ids.txt')
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # 代理設定
 HTTP_PROXY_ENABLED = os.environ.get("HTTP_PROXY_ENABLED", "false").lower() == "true"
@@ -166,21 +166,42 @@ def extract_post_text(post):
     content_text = re.sub(r"<[^>]*>", "", content_html)
     return unescape(content_text.strip())
 
-# --- 6. 使用 Google Cloud Translation 翻譯英文為中文 ---
-def translate_to_chinese(text, retries=2):
-    # Google Cloud Translation fallback
+# --- 6. 使用 OpenRouter AI 分析貼文是否影響虛擬貨幣、股市 ---
+def analyze_post_impact(text):
     try:
-        print("🔁 使用 Google Cloud Translation fallback 翻譯中...")
-        url = f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_API_KEY}"
-        payload = {
-            "q": text,
-            "target": "zh-TW"
+        print("🤖 使用 OpenRouter AI 分析貼文影響...")
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
         }
-        res = requests.post(url, json=payload, proxies=proxies)
-        return res.json()["data"]["translations"][0]["translatedText"]
+        
+        payload = {
+            "model": "openai/gpt-oss-20b:free",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"{text} 分析以上這則大括號內的貼文，是否會影響虛擬貨幣、股市，如果會影響的話，回答規則如下：[Yes!Yes!Yes!]{{將大括號的貼文翻譯成繁體中文}}，如果不會影響的話，只需要回答：[No!No!No!]"
+                }
+            ]
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, proxies=proxies)
+        
+        if response.status_code == 200:
+            result = response.json()
+            content = result['choices'][0]['message']['content']
+            print(f"✅ OpenRouter AI 分析結果: {content[:100]}...")
+            return content
+        else:
+            print(f"❌ OpenRouter AI 請求失敗，狀態碼：{response.status_code}")
+            print(f"錯誤訊息：{response.text}")
+            return None
+            
     except Exception as e:
-        print("❌ Google Cloud Translation 翻譯也失敗:", e)
-        return "[翻譯失敗]"
+        print(f"❌ OpenRouter AI 分析失敗: {e}")
+        return None
     
 # --- 7. 主程式邏輯 ---
 def main():
@@ -199,7 +220,7 @@ def main():
                 seen_ids.add(post_id)
 
         if new_posts:
-            print(f"📢 推送 {len(new_posts)} 篇新貼文")
+            print(f"📢 分析 {len(new_posts)} 篇新貼文")
 
             # 按發文時間排序，舊的先通知
             for post in sorted(new_posts, key=lambda x: x["created_at"]):
@@ -208,10 +229,28 @@ def main():
                 url = post["url"]
                 media = post.get("media_attachments", [])
                 media_note = "\n🎥 <i>含有影片</i>" if any(m['type'] == 'video' for m in media) else ""
-                # 呼叫翻譯函數
-                translated = translate_to_chinese(text)
-                msg = f"<b>{display_name} 發文：</b>\n{text}\n\n<b>翻譯：</b>\n{translated}\n🔗 {url}{media_note}"
-                send_telegram_message(msg)
+                
+                # 使用 OpenRouter AI 分析貼文影響
+                analysis_result = analyze_post_impact(text)
+                
+                if analysis_result:
+                    if analysis_result.startswith("[Yes!Yes!Yes!]"):
+                        # 擷取大括號內的翻譯內容
+                        import re
+                        translation_match = re.search(r'\{([^}]+)\}', analysis_result)
+                        if translation_match:
+                            translated_content = translation_match.group(1)
+                            msg = f"<b>{display_name} 發文：</b>\n{text}\n\n<b>分析結果：</b>\n{translated_content}\n🔗 {url}{media_note}"
+                            send_telegram_message(msg)
+                            print("📤 貼文影響市場，已發送 Telegram 訊息")
+                        else:
+                            print("⚠️ AI 回應格式異常，無法擷取翻譯內容")
+                    elif analysis_result.startswith("[No!No!No!]"):
+                        print("📝 貼文不影響市場，不發送訊息")
+                    else:
+                        print(f"⚠️ AI 回應格式未知: {analysis_result[:50]}...")
+                else:
+                    print("❌ AI 分析失敗，跳過此貼文")
 
             # 更新已通知清單
             save_seen_ids(seen_ids)
