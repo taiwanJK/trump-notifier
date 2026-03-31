@@ -40,9 +40,11 @@ if HTTP_PROXY_ENABLED and HTTP_PROXY_HOST and HTTP_PROXY_PORT:
     }
     print(f"🔒 已啟用HTTP代理: {HTTP_PROXY_HOST}:{HTTP_PROXY_PORT}")
     
-    # 設定環境變數，讓子進程也能使用代理
+    # 設定環境變數，讓子進程也能使用代理（truthbrush 讀小寫）
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["http_proxy"] = proxy_url
+    os.environ["https_proxy"] = proxy_url
 else:
     print("ℹ️ 未啟用HTTP代理")
 
@@ -178,7 +180,7 @@ def analyze_post_impact(text):
         }
         
         payload = {
-            "model": "openai/gpt-oss-20b:free",
+            "model": "qwen/qwen3.6-plus-preview:free",
             "messages": [
                 {
                     "role": "user",
