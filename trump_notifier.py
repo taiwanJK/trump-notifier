@@ -171,39 +171,152 @@ def extract_post_text(post):
 # --- 6. 使用 OpenRouter AI 分析貼文是否影響虛擬貨幣、股市 ---
 def analyze_post_impact(text):
     try:
+        import re
         print("🤖 使用 OpenRouter AI 分析貼文影響...")
         url = "https://openrouter.ai/api/v1/chat/completions"
-        
+
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json"
         }
-        
+
+        system_prompt = (
+            "You are a financial news analyst. Analyze the given post and output ONLY valid JSON (no markdown, no explanation).\n"
+            "Output format:\n"
+            "{\n"
+            '  "summary": "<1-2 sentence summary in Traditional Chinese of the core event>",\n'
+            '  "impact_score": <integer 0-100, how much this affects financial markets>,\n'
+            '  "event_category": "<one of: tariff_trade | geopolitical_war | geopolitical_energy_shock | fed_rates | usd_policy | crypto_policy | domestic_politics | non_market_noise>",\n'
+            '  "impact": [\n'
+            '    { "asset": "BTC", "score": <integer -3 to 3>, "score_1d": <integer -3 to 3, optional, only if short and mid-term differ> },\n'
+            '    { "asset": "QQQ", "score": <integer -3 to 3> },\n'
+            '    { "asset": "DXY", "score": <integer -3 to 3> },\n'
+            '    { "asset": "GOLD", "score": <integer -3 to 3> },\n'
+            '    { "asset": "OIL", "score": <integer -3 to 3> }\n'
+            "  ]\n"
+            "}\n"
+            "Score scale: +3=strong bullish, +2=bullish, +1=weak bullish, 0=neutral, -1=weak bearish, -2=bearish, -3=strong bearish.\n"
+            "\n"
+            "Asset-specific judgment rules:\n"
+            "OIL: bullish if Middle East conflict, tanker route disruption, sanctions, supply disruption risk; bearish if production increase, peace talks, supply recovery.\n"
+            "GOLD: bullish if risk-off sentiment, war risk, inflation risk; bearish if risk decreases, USD real rates surge.\n"
+            "DXY: bullish if short-term risk-off, capital flows back to USD; bearish if post weakens US credibility, raises rate-cut expectations, or undermines USD dominance. Use 0 if signals conflict.\n"
+            "QQQ: bullish if risk-on, rate-cut expectations, tech/AI tailwinds; bearish if oil prices rise, inflation, higher yields, or geopolitical risk increases.\n"
+            "BTC: bullish if risk-on, crypto policy tailwind, USD weakening; bearish (short-term/15m) if sudden war, leveraged deleveraging, or stock market crash; if event drives inflation-hedge or de-dollarization narrative, 1d may turn bullish. "
+            "If short-term (score) and mid-term (score_1d) differ, output both fields.\n"
+            "\n"
+            "Other rules:\n"
+            "- impact_score 85-100: major market-moving event (policy, war, crisis)\n"
+            "- impact_score 60-84: moderate impact (trade, regulation, economy)\n"
+            "- impact_score 40-59: minor impact\n"
+            "- impact_score 0-39: no meaningful market impact\n"
+            "- event_category must be exactly one of the listed values.\n"
+            "- Output ONLY the JSON object, nothing else."
+        )
+
         payload = {
             "model": "qwen/qwen3.6-plus-preview:free",
             "messages": [
-                {
-                    "role": "user",
-                    "content": f"{text} 分析以上這則大括號內的貼文，是否會影響虛擬貨幣、股市，如果會影響的話，回答規則如下：[Yes!Yes!Yes!]{{將大括號的貼文翻譯成繁體中文}}，如果不會影響的話，只需要回答：[No!No!No!]"
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
             ]
         }
-        
+
         response = requests.post(url, headers=headers, json=payload, proxies=proxies)
-        
+
         if response.status_code == 200:
             result = response.json()
-            content = result['choices'][0]['message']['content']
-            print(f"✅ OpenRouter AI 分析結果: {content[:100]}...")
-            return content
+            content = result['choices'][0]['message']['content'].strip()
+            print(f"✅ OpenRouter AI 原始回應: {content[:200]}...")
+
+            # 擷取 JSON（防止 LLM 包了 markdown code block）
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if not json_match:
+                print("❌ 無法從回應中擷取 JSON")
+                return None
+
+            parsed = json.loads(json_match.group(0))
+            return parsed
         else:
             print(f"❌ OpenRouter AI 請求失敗，狀態碼：{response.status_code}")
             print(f"錯誤訊息：{response.text}")
             return None
-            
+
+    except json.JSONDecodeError as e:
+        print(f"❌ OpenRouter AI 回應 JSON 解析失敗: {e}")
+        return None
     except Exception as e:
         print(f"❌ OpenRouter AI 分析失敗: {e}")
         return None
+
+
+# --- 6b. 將分析結果格式化為 Telegram 訊息 ---
+def format_analysis_message(display_name, text, url, media_note, analysis):
+    impact_score = analysis.get("impact_score", 0)
+    summary = analysis.get("summary", "")
+    event_category = analysis.get("event_category", "")
+    impacts = analysis.get("impact", [])
+
+    # 決定影響等級
+    if impact_score >= 85:
+        level_label = "🚨 <b>HIGH</b>"
+    elif impact_score >= 60:
+        level_label = "🟨 <b>MEDIUM</b>"
+    elif impact_score >= 40:
+        level_label = "🟦 <b>LOW</b>"
+    else:
+        level_label = "⚪ <b>IGNORE</b>"
+
+    # 市場事件分類對應
+    category_map = {
+        "tariff_trade":             "🛃 關稅／貿易",
+        "geopolitical_war":         "⚔️ 地緣政治／戰爭",
+        "geopolitical_energy_shock":"⚡ 地緣政治／能源衝擊",
+        "fed_rates":                "🏦 聯準會／利率",
+        "usd_policy":               "💵 美元政策",
+        "crypto_policy":            "🪙 加密貨幣政策",
+        "domestic_politics":        "🏛️ 國內政治",
+        "non_market_noise":         "📢 非市場雜訊",
+    }
+    category_label = category_map.get(event_category, f"❓ {event_category}")
+
+    # 格式化市場影響
+    score_map = {
+        3:  "強利多 ↑↑↑",
+        2:  "利多 ↑↑",
+        1:  "弱利多 ↑",
+        0:  "中性 →",
+        -1: "弱利空 ↓",
+        -2: "利空 ↓↓",
+        -3: "強利空 ↓↓↓",
+    }
+
+    def score_label(s):
+        s = max(-3, min(3, int(s)))  # 防禦性 clamp
+        return score_map.get(s, "中性 →")
+
+    market_lines = []
+    for item in impacts:
+        asset = item.get("asset", "")
+        score = item.get("score", 0)
+        line = f"  - {asset}: {score_label(score)}"
+        # BTC 短中線不同時，附加 1d 標註
+        if asset == "BTC" and "score_1d" in item:
+            line += f"（短線） / {score_label(item['score_1d'])}（1d）"
+        market_lines.append(line)
+
+    market_section = "\n".join(market_lines) if market_lines else "  （無明顯影響）"
+
+    msg = (
+        f"<b>{display_name} 發文：</b>\n"
+        f"{text}\n\n"
+        f"<b>摘要：</b>\n{summary}\n\n"
+        f"<b>影響等級：</b> {level_label}（{impact_score}/100）\n"
+        f"<b>市場事件：</b> {category_label}\n\n"
+        f"<b>市場影響：</b>\n{market_section}\n\n"
+        f"🔗 {url}{media_note}"
+    )
+    return msg
     
 # --- 7. 主程式邏輯 ---
 def main():
@@ -234,23 +347,17 @@ def main():
                 
                 # 使用 OpenRouter AI 分析貼文影響
                 analysis_result = analyze_post_impact(text)
-                
+
                 if analysis_result:
-                    if analysis_result.startswith("[Yes!Yes!Yes!]"):
-                        # 擷取大括號內的翻譯內容
-                        import re
-                        translation_match = re.search(r'\{([^}]+)\}', analysis_result)
-                        if translation_match:
-                            translated_content = translation_match.group(1)
-                            msg = f"<b>{display_name} 發文：</b>\n{text}\n\n<b>分析結果：</b>\n{translated_content}\n🔗 {url}{media_note}"
-                            send_telegram_message(msg)
-                            print("📤 貼文影響市場，已發送 Telegram 訊息")
-                        else:
-                            print("⚠️ AI 回應格式異常，無法擷取翻譯內容")
-                    elif analysis_result.startswith("[No!No!No!]"):
-                        print("📝 貼文不影響市場，不發送訊息")
+                    impact_score = analysis_result.get("impact_score", 0)
+                    print(f"📊 影響分數: {impact_score}/100")
+
+                    if impact_score >= 40:
+                        msg = format_analysis_message(display_name, text, url, media_note, analysis_result)
+                        send_telegram_message(msg)
+                        print("📤 貼文影響市場，已發送 Telegram 訊息")
                     else:
-                        print(f"⚠️ AI 回應格式未知: {analysis_result[:50]}...")
+                        print(f"📝 影響分數過低（{impact_score}），不發送訊息")
                 else:
                     print("❌ AI 分析失敗，跳過此貼文")
 
