@@ -18,6 +18,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = 600  # 每 600 秒（10 分鐘）檢查一次
 SEEN_IDS_FILE = Path('seen_post_ids.txt')
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+CURRENT_NEWS_API_KEY = os.environ.get("CURRENT_NEWS_API_KEY")
 
 # 代理設定
 HTTP_PROXY_ENABLED = os.environ.get("HTTP_PROXY_ENABLED", "false").lower() == "true"
@@ -159,6 +160,84 @@ def fetch_trump_posts():
         print(f"詳細錯誤訊息: {traceback.format_exc()}")
         return []
 
+# --- 5a. 從 Currents API 抓取最新新聞 ---
+def fetch_currents_news():
+    """從 Currents API 取得最新英文新聞，回傳新聞列表（最多 20 則）"""
+    if not CURRENT_NEWS_API_KEY:
+        print("⚠️ 未設定 CURRENT_NEWS_API_KEY，跳過新聞比對")
+        return []
+
+    try:
+        url = "https://api.currentsapi.services/v1/latest-news"
+        params = {
+            "apiKey": CURRENT_NEWS_API_KEY,
+            "language": "en",
+        }
+        response = requests.get(url, params=params, proxies=proxies, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            news_list = data.get("news", [])
+            print(f"📰 Currents API 取得 {len(news_list)} 則新聞")
+            return news_list
+        else:
+            print(f"❌ Currents API 請求失敗，狀態碼：{response.status_code}，訊息：{response.text[:200]}")
+            return []
+    except Exception as e:
+        print(f"❌ 抓取 Currents 新聞時發生錯誤: {e}")
+        return []
+
+
+# --- 5b. 比對貼文關鍵字與新聞，找出相關新聞 ---
+def find_matching_news(post_text, news_list):
+    """
+    從貼文中提取有意義的關鍵字，與新聞標題/描述比對，
+    回傳相關新聞列表（最多 5 則）。
+    """
+    import re
+
+    # 英文停用詞（過濾無意義的詞）
+    STOP_WORDS = {
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "that", "this", "these", "those",
+        "it", "its", "he", "she", "we", "they", "i", "you", "my", "our",
+        "their", "his", "her", "not", "no", "so", "as", "if", "into", "about",
+        "up", "out", "over", "then", "than", "more", "also", "just", "get",
+        "all", "can", "what", "very", "new", "now", "said", "says", "say",
+    }
+
+    # 提取貼文關鍵字（長度 >= 4 的非停用詞）
+    words = re.findall(r"[a-zA-Z]{4,}", post_text.lower())
+    keywords = {w for w in words if w not in STOP_WORDS}
+
+    if not keywords:
+        return []
+
+    matched = []
+    for article in news_list:
+        title = (article.get("title") or "").lower()
+        description = (article.get("description") or "").lower()
+        combined = f"{title} {description}"
+
+        # 計算命中的關鍵字數
+        hits = sum(1 for kw in keywords if kw in combined)
+        if hits >= 2:  # 至少 2 個關鍵字命中
+            matched.append((hits, article))
+
+    # 按命中數排序，取前 5 則
+    matched.sort(key=lambda x: x[0], reverse=True)
+    result = [article for _, article in matched[:5]]
+
+    if result:
+        print(f"🔗 找到 {len(result)} 則與貼文相關的新聞")
+    else:
+        print("🔍 未找到與貼文關鍵字相符的新聞")
+
+    return result
+
+
 # --- 5. 將 HTML 貼文轉成純文字 ---
 def extract_post_text(post):
     # 處理 HTML content
@@ -169,7 +248,7 @@ def extract_post_text(post):
     return unescape(content_text.strip())
 
 # --- 6. 使用 OpenRouter AI 分析貼文是否影響虛擬貨幣、股市 ---
-def analyze_post_impact(text):
+def analyze_post_impact(text, related_news=None):
     try:
         import re
         print("🤖 使用 OpenRouter AI 分析貼文影響...")
@@ -214,11 +293,32 @@ def analyze_post_impact(text):
             "- Output ONLY the JSON object, nothing else."
         )
 
+        # 組合用戶訊息：貼文 + 相關新聞（若有）
+        user_content = f"Post:\n{text}"
+        if related_news:
+            news_context_lines = []
+            for i, article in enumerate(related_news, 1):
+                title = article.get("title", "")
+                description = article.get("description", "") or ""
+                published = article.get("published", "")
+                source_url = article.get("url", "")
+                news_context_lines.append(
+                    f"[News {i}] {title}\n"
+                    f"  Published: {published}\n"
+                    f"  Summary: {description[:200]}\n"
+                    f"  URL: {source_url}"
+                )
+            news_context = "\n\n".join(news_context_lines)
+            user_content += (
+                f"\n\n---\nRelated News (use to assess credibility and context):\n{news_context}"
+            )
+            print(f"📎 附加 {len(related_news)} 則相關新聞至分析請求")
+
         payload = {
             "model": "openai/gpt-oss-120b:free",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text}
+                {"role": "user", "content": user_content}
             ]
         }
 
@@ -251,7 +351,7 @@ def analyze_post_impact(text):
 
 
 # --- 6b. 將分析結果格式化為 Telegram 訊息 ---
-def format_analysis_message(display_name, text, url, media_note, analysis):
+def format_analysis_message(display_name, text, url, media_note, analysis, related_news=None):
     impact_score = analysis.get("impact_score", 0)
     summary = analysis.get("summary", "")
     event_category = analysis.get("event_category", "")
@@ -307,13 +407,24 @@ def format_analysis_message(display_name, text, url, media_note, analysis):
 
     market_section = "\n".join(market_lines) if market_lines else "  （無明顯影響）"
 
+    # 相關新聞來源區段
+    news_section = ""
+    if related_news:
+        news_lines = []
+        for i, article in enumerate(related_news[:3], 1):  # 最多顯示 3 則
+            title = article.get("title", "")
+            article_url = article.get("url", "")
+            news_lines.append(f"  {i}. <a href=\"{article_url}\">{title}</a>")
+        news_section = "\n\n<b>📰 相關新聞（可信度來源）：</b>\n" + "\n".join(news_lines)
+
     msg = (
         f"<b>{display_name} 發文：</b>\n"
         f"{text}\n\n"
         f"<b>摘要：</b>\n{summary}\n\n"
         f"<b>影響等級：</b> {level_label}（{impact_score}/100）\n"
         f"<b>市場事件：</b> {category_label}\n\n"
-        f"<b>市場影響：</b>\n{market_section}\n\n"
+        f"<b>市場影響：</b>\n{market_section}"
+        f"{news_section}\n\n"
         f"🔗 {url}{media_note}"
     )
     return msg
@@ -337,6 +448,9 @@ def main():
         if new_posts:
             print(f"📢 分析 {len(new_posts)} 篇新貼文")
 
+            # 抓取 Currents 最新新聞（每輪只抓一次，供所有新貼文共用）
+            currents_news = fetch_currents_news()
+
             # 按發文時間排序，舊的先通知
             for post in sorted(new_posts, key=lambda x: x["created_at"]):
                 display_name = post["account"]["display_name"]
@@ -344,16 +458,19 @@ def main():
                 url = post["url"]
                 media = post.get("media_attachments", [])
                 media_note = "\n🎥 <i>含有影片</i>" if any(m['type'] == 'video' for m in media) else ""
-                
-                # 使用 OpenRouter AI 分析貼文影響
-                analysis_result = analyze_post_impact(text)
+
+                # 比對貼文與新聞關鍵字，找出相關新聞
+                related_news = find_matching_news(text, currents_news)
+
+                # 使用 OpenRouter AI 分析貼文影響（附帶相關新聞）
+                analysis_result = analyze_post_impact(text, related_news=related_news)
 
                 if analysis_result:
                     impact_score = analysis_result.get("impact_score", 0)
                     print(f"📊 影響分數: {impact_score}/100")
 
                     if impact_score >= 40:
-                        msg = format_analysis_message(display_name, text, url, media_note, analysis_result)
+                        msg = format_analysis_message(display_name, text, url, media_note, analysis_result, related_news=related_news)
                         send_telegram_message(msg)
                         print("📤 貼文影響市場，已發送 Telegram 訊息")
                     else:
