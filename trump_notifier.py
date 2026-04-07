@@ -215,7 +215,7 @@ def analyze_post_impact(text):
         )
 
         payload = {
-            "model": "qwen/qwen3.6-plus-preview:free",
+            "model": "openai/gpt-oss-120b:free",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
