@@ -1,4 +1,3 @@
-import subprocess
 import json
 import time
 import requests
@@ -19,6 +18,10 @@ CHECK_INTERVAL = 600  # 每 600 秒（10 分鐘）檢查一次
 SEEN_IDS_FILE = Path('seen_post_ids.txt')
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 CURRENT_NEWS_API_KEY = os.environ.get("CURRENT_NEWS_API_KEY")
+
+# Cloudflare 瀏覽器指紋模擬 — 若未來被封鎖只需改這一行
+# 可用值參考 curl_cffi BrowserType: firefox133, firefox135, chrome136, chrome124 等
+IMPERSONATE = "firefox133"
 
 # 代理設定
 HTTP_PROXY_ENABLED = os.environ.get("HTTP_PROXY_ENABLED", "false").lower() == "true"
@@ -41,13 +44,43 @@ if HTTP_PROXY_ENABLED and HTTP_PROXY_HOST and HTTP_PROXY_PORT:
     }
     print(f"🔒 已啟用HTTP代理: {HTTP_PROXY_HOST}:{HTTP_PROXY_PORT}")
     
-    # 設定環境變數，讓子進程也能使用代理（truthbrush 讀小寫）
+    # 設定環境變數，truthbrush 在 import 時讀取（需在 import 前設定）
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
     os.environ["http_proxy"] = proxy_url
     os.environ["https_proxy"] = proxy_url
 else:
     print("ℹ️ 未啟用HTTP代理")
+
+# Monkey-patch truthbrush 使用可設定的 impersonate，避免 Cloudflare 封鎖
+import truthbrush.api as _tb_api
+import curl_cffi as _curl_cffi
+
+def _patched_get(self, url, params=None):
+    from loguru import logger
+    try:
+        resp = self._make_session().get(
+            _tb_api.API_BASE_URL + url,
+            params=params,
+            proxies=_tb_api.proxies,
+            impersonate=IMPERSONATE,
+            headers={
+                "Authorization": "Bearer " + self.auth_id,
+                "User-Agent": _tb_api.USER_AGENT,
+            },
+        )
+    except _curl_cffi.curl.CurlError as e:
+        logger.error(f"Curl error: {e}")
+        return None
+    self._check_ratelimit(resp)
+    try:
+        r = resp.json()
+    except json.JSONDecodeError:
+        logger.error(f"Failed to decode JSON: {resp.text}")
+        r = None
+    return r
+
+_tb_api.Api._get = _patched_get
 
 # --- 1. 傳送 Telegram 訊息函數 ---
 def send_telegram_message(text):
@@ -80,83 +113,41 @@ def save_seen_ids(seen_ids):
 
 # --- 4. 使用 truthbrush 抓取川普貼文
 def fetch_trump_posts():
-    # 取得當下 UTC 時間往前 15 分鐘作為篩選時間
-    fifteen_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
-    since = fifteen_minutes_ago.isoformat()
+    import re
 
-    print(f"🔍 抓取從 {since} 之後的貼文...")
+    fifteen_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+    print(f"🔍 抓取從 {fifteen_minutes_ago.isoformat()} 之後的貼文（impersonate={IMPERSONATE}）...")
 
     try:
-        cmd = ["truthbrush", "statuses", TRUTHSOCIAL_SEARCH_USERNAME, "--no-replies", "--created-after", since]
-        print("執行命令:", " ".join(cmd))
-        
-        # 設定環境變數，讓 truthbrush 使用代理
-        env = os.environ.copy()
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=env
-        )
-        
-        # 檢查命令是否執行成功
-        if result.returncode != 0:
-            print(f"❌ truthbrush 命令執行失敗，錯誤碼: {result.returncode}")
-            print(f"錯誤輸出: {result.stderr}")
-            
-            # 檢查是否為認證錯誤
-            if "Failed login request" in result.stderr or "HTTP Error 403" in result.stderr:
-                print("⚠️ 認證錯誤: truthbrush 無法登入 Truth Social 平台")
-                print("請檢查以下可能的問題:")
-                print("1. truthbrush 的認證資訊是否正確")
-                print("2. 伺服器的 IP 是否被 Truth Social 封鎖")
-                print("3. Truth Social API 是否有變更或限制")
-                print("4. 代理設定是否正確")
-            
-            return []
-            
-        # 檢查輸出是否為空
-        if not result.stdout.strip():
-            print("⚠️ truthbrush 命令執行成功，但沒有返回任何資料")
-            return []
-            
-        print(f"✅ truthbrush 命令執行成功，開始解析資料...")
-        
-        try:
-            posts = [json.loads(line) for line in result.stdout.strip().splitlines() if line.strip()]
-            print(f"📊 解析到 {len(posts)} 則貼文")
-        except json.JSONDecodeError as je:
-            print(f"❌ JSON 解析錯誤: {je}")
-            print(f"原始輸出: {result.stdout[:200]}..." if len(result.stdout) > 200 else result.stdout)
-            return []
+        api = _tb_api.Api()
+        posts = list(api.pull_statuses(
+            TRUTHSOCIAL_SEARCH_USERNAME,
+            replies=False,
+            created_after=fifteen_minutes_ago,
+        ))
+        print(f"📊 抓取到 {len(posts)} 則貼文")
 
-        # 過濾掉轉發的貼文
         original_posts = []
         for post in posts:
-            # 獲取貼文內容並清除 HTML 標籤
-            from html import unescape
-            import re
             content_html = post.get("content", "")
             content_text = re.sub(r"<[^>]*>", "", content_html).strip()
-            
-            # 檢查是否為轉發貼文且有文字內容
-            if (post.get("reblog") is None and 
-                not content_html.startswith("RT @") and 
-                content_text):  # 確保有文字內容
+            if (post.get("reblog") is None and
+                    not content_html.startswith("RT @") and
+                    content_text):
                 original_posts.append(post)
             else:
                 reason = "轉發貼文" if post.get("reblog") is not None or content_html.startswith("RT @") else "無文字內容"
                 print(f"🔄 過濾掉一則貼文: ID {post.get('id')} (原因: {reason})")
-                
+
         return original_posts
-    except FileNotFoundError as fnf:
-        print(f"❌ 找不到 truthbrush 命令: {fnf}")
-        print("請確認 truthbrush 已正確安裝在伺服器上，並且在 PATH 環境變數中")
+
+    except TypeError as e:
+        print(f"❌ 無法查詢用戶（可能是 Cloudflare 封鎖）: {e}")
+        print(f"💡 嘗試修改 IMPERSONATE 變數，目前為 '{IMPERSONATE}'")
         return []
     except Exception as e:
-        print(f"❌ 抓取貼文時發生錯誤: {type(e).__name__}: {e}")
         import traceback
+        print(f"❌ 抓取貼文時發生錯誤: {type(e).__name__}: {e}")
         print(f"詳細錯誤訊息: {traceback.format_exc()}")
         return []
 
